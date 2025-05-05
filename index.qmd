@@ -1,5 +1,4 @@
 ---
-title: "analysis-blog"
 listing:
   contents: posts
   sort: "date desc"
