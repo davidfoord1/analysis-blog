@@ -2,7 +2,9 @@
 listing:
   contents: posts
   sort: "date desc"
-  type: default
+  fields: [title, subtitle, description, date]
+  date-format: iso
+  type: grid
   categories: true
   sort-ui: false
   filter-ui: false
