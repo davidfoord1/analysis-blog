@@ -5,3 +5,6 @@ ideas.md
 
 # don't upload site for now
 _site/
+
+.Rproj.user
+*.Rproj

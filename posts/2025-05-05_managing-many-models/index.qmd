@@ -1,0 +1,215 @@
+---
+title: 'Learning to manage many models in R'
+date: 2025-05-05
+categories:
+  - R
+  - dplyr
+  - tidyr
+  - purrr
+  - broom
+  - lm
+---
+
+Using list-columns to process vectors of complex objects.
+
+## A need for many models
+
+I was tasked with creating a Slope Index of Inequality (SII) on a health
+performance measure for all of a group of organisations in England, to look at
+inequalities across deprivation quintiles[^imd]. This meant I was going to need
+to run an individual weighted least squares regression on each of the
+organisations for every rolling 12-month period over several years.
+
+[^imd]: 
+[English indices of deprivation](https://www.gov.uk/government/collections/english-indices-of-deprivation)
+
+Having only run a single `lm()` call at a time before it seemed like it might be
+quite complicated.  The `lm` object produced has some complexity to it, and I
+felt like I was going to have to go for a clunky and difficult split-apply-bind
+process, where the functions to apply were:
+
+  1. To build the model.
+
+  2. To also in some way to unpack it sensibly, ready for collating all the
+  results.
+
+## Learning about the magic of list-columns
+
+Fortunately, I found this was a challenge that had already been well
+considered. In my search for a solution I ran in to a couple of very helpful
+talks from regular R stars presenting an excellent, and importantly, simple way
+of tackling this with list-columns.
+ 
+- [Hadley Wickham - Managing many models](https://www.youtube.com/watch?v=rz3_FDVt9eg)
+- [Jenny Bryan - Row-oriented workflows](https://posit.co/resources/videos/thinking-inside-the-box-you-can-do-that-inside-a-data-frame/)
+
+A `data.frame` typically consists of columns which are "atomic" vectors, the
+basic building blocks from an R-user perspective, of sequences of `numeric`,
+`character` and `logical` values. What do we do if we want a vector of some more
+complex objects, like an `lm` object? That's where lists come in. A list is a
+generic vector that can hold any kind of object.[^nest]
+
+[^nest]: Including *lists*. A `list` is a recursive structure in that it can hold
+other lists. Many more complex types are essentially just list themselves, 
+including `lm` objects - you can investigate using `typeof()` and compare
+to the results of `class()`.
+
+## Dummy data
+
+We'll create some fake data to show the structure.
+
+```{r dummy_data}
+set.seed(5678)
+
+dates <- seq(as.Date('2018-01-01'), 
+             as.Date('2024-12-01'), 
+             "months")
+
+dummy_data <- expand.grid(org = LETTERS,
+                          deprivation = 1:5,
+                          reporting_date = dates,
+                          stringsAsFactors = FALSE)
+
+# make up some numbers!
+dummy_data$performance <- rnorm(NROW(dummy_data), mean = 0.65, sd = 0.1)
+
+# how many rows and columns?
+dim(dummy_data)
+
+head(dummy_data)
+```
+
+## A column of tables
+
+So, let's create our first list-column; the values by deprivation put into a
+table grouped by organisation and date, nested within our overall table. We 
+can get there with tidyverse staple packages
+[dplyr](https://cran.r-project.org/web/packages/dplyr/index.html) and
+[tidyr](https://cran.r-project.org/web/packages/tidyr/index.html). 
+`tidyr::nest()` is the restructuring powerhouse here, neatly wrapping up the
+data into individual tables based on specified grouping:
+
+```{r nest}
+dummy_models <- dummy_data |>
+  dplyr::group_by(org, reporting_date) |> 
+  tidyr::nest() 
+
+# the default column-name output by `nest()` is `data`
+head(dummy_models)
+```
+
+All our values are still there, grouped together in each row. Here's the
+data for just the first row:
+
+```{r first_row_data}
+dummy_models$data[[1]]
+```
+
+We start to see the power of this structure. I think of each cell in a
+spreadsheet containing a whole table itself. We can operate on the `data`
+column almost as if it was any old vector, within a `dplyr::mutate()` call.
+
+## A column of *models*
+
+We'll create our SII model function as a simple wrapper around `lm()`.[^sii] 
+
+[^sii]: The real thing has slightly more to it. There are specific x-values so
+that the gradient represents the gap from lowest to highest deprivation
+quintiles, as opposed to the increase in "performance" per 1 unit increase in
+"deprivation". A `weights` argument is supplied to `lm()` to adjust for
+population, where the volumes are in another column in each `data` column table.
+
+```{r sii_model}
+model_sii <- function(df) lm(performance ~ deprivation, data = df)
+```
+
+Ok, list-columns are not *quite* like any other column. We do need to make sure
+we're outputting back to a list for the list-column to work. This could be a
+feature we write in our function, but more simply we can apply a function to
+every row and get a list back using either `lapply()` or `purrr:map()`. With
+that we can use a regular assignment or `dplyr::mutate()` call.
+
+```{r doing_it_row-wise}
+dummy_models <- dummy_models |>
+  dplyr::mutate(sii_model = purrr::map(data, model_sii))
+
+head(dummy_models)
+```
+
+We can't see much of what's going on individually like this, but I think it's is
+great - a whole model object per row! That's `r NROW(dummy_models)` models. Yes,
+each row has the full thing we can take a look itself:
+
+```{r first_row}
+# model in the first row:
+summary(dummy_models$sii_model[[1]])
+```
+
+## Getting the values back out
+
+Another R-star David Robinson makes it easier to then start pulling out some of
+the data from the model results with the
+[broom package](https://cran.r-project.org/web/packages/broom/index.html). 
+We can use `broom::tidy()` to get our third list-column, which contains the
+model coefficients of the gradient and intercept.
+
+```{r broom-broom}
+dummy_models <- dummy_models |>
+  dplyr::mutate(sii_coeffs = purrr::map(sii_model, broom::tidy)) 
+
+head(dummy_models)
+```
+
+So each row has a table of model info; we can see it has the standard errors and
+t-statistics and p-values too:
+
+```{r coeffs_table}
+# first row coefficients
+dummy_models$sii_coeffs[[1]]
+```
+
+Finally {tidyr} helps us get the specific values back up to the main table. 
+
+```{r unnest}
+dummy_models <- dummy_models |>
+  tidyr::unnest(sii_coeffs)
+
+head(dummy_models)
+```
+
+Neatening up the output a bit:
+
+```{r neaten} 
+dummy_models <- dummy_models |> 
+  dplyr::filter(term == "deprivation") |> 
+  dplyr::select(org,
+                reporting_date,
+                sii = estimate,
+                std_err = std.error)
+  
+head(dummy_models) 
+```
+
+## All together now
+
+The key steps again in one chain, a succinct set of steps that simplifies
+something that could be quite complex:
+
+```{r all_together}
+dummy_data |> 
+  dplyr::group_by(org, reporting_date) |> 
+  tidyr::nest() |> # create our data column
+  dplyr::mutate(
+    sii_model = purrr::map(data, model_sii),        # 1 apply the model
+    sii_coeffs = purrr::map(sii_model, broom::tidy) # 2 unpack it sensibly 
+  ) |> 
+  tidyr::unnest(sii_coeffs) |> 
+  dplyr::ungroup() 
+```
+
+## Further thoughts 
+
+It will probably be a good idea to check out the 
+[parameters package](https://cran.r-project.org/web/packages/parameters/index.html)
+at some point, which provides further utilities for working with model results
+beyond the scope of {broom}.
