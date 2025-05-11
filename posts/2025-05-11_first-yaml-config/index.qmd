@@ -1,0 +1,214 @@
+---
+title: "Using a yaml config for the first time"
+date: 2025-05-11
+categories:
+  - R
+  - config
+  - yaml
+---
+
+Running a process with different configurations, and several at once.
+
+## A need for different configurations
+
+I was implementing a basic rules-based model estimating impacts of changes in
+early diagnosis rates of cancer on patient (5-year) survival rates. A central
+part of this was looking at staged cancers from the published
+[cancer registration statistics](https://digital.nhs.uk/data-and-information/publications/statistical/cancer-registration-statistics), 
+and shifting patients from late stage (stages 3 and 4) to early stage (stages 1
+and 2). A question that arose when discussing the model with different teams
+was:
+
+**What happens if we include 'missing' stage cancers as if they were late stage?**
+
+To answer this question I would need to run the process several times,
+capturing and collating the results in a way that could be compared to see how
+sensitivity the results were to this change. I'd still want to be able to just
+do the regular run though, in fact user control over each run would be best.
+
+## Preparing my existing process for change
+
+I had my main script, which started by sourcing several functions in from an
+'R/' folder, then ran a series of calls to those functions. The results of the
+calls were assigned to intermediate variables, culminating in a final
+`data.frame` to be exported for use in other analyses. There was *some*
+flexibility in the design of the process, but it needed a fairly significant
+change conceptually to meet the demand of running several times and comparing.
+
+What do we do when we need to execute a similar piece of code a number of
+times, with "some" change of values and process? Well, that's exactly what a
+function is for (of course!). So I moved all of the model's transformations out
+in to yet another function, let's call it `build_model()`, which in itself was
+the orchestrator of all the transformation functions. Things that wouldn't
+change between different runs, in this case the data sources, could stay in the
+main script.
+
+So now it looks something like this:
+```r
+# Set up ----
+
+# Load user defined functions
+invisible(lapply(dir('R', full.names = TRUE)))
+
+# Load data ----
+
+conn <- connect_to_data_source()
+data_list <- load_data(conn)
+
+# Model transformation ----
+
+result <- build_model(data_list)
+
+# Output ----
+
+write_to_file(result)
+```
+
+## Introducing changes
+
+Next I needed to implement the changes to the process, which was to be able to
+toggle the inclusing of 'missing' cancers wherever cancer registrations data
+was used.  There were a few different places, which we wanted to be able to
+look at the impact of individually, which is what meant I needed to support
+several scenarios rather than just a single on/off. 
+
+What this looked like was introducing an `if()` in each of those places, that
+chose between filtering 'missing' cancers out or not, based on a `logical`
+argument passed to the individual function implementing that part of the
+process.
+
+Let's call it 3 places. That means there a 3 functions called by
+`build_model()` that now need an additional argument supplied, and we want this
+to be able to change on different runs, so this becomes an argument to
+`build_model()` itself. I like to keep related things together, so I used a
+single argument - a `list` of 3 named logical values. Forgive the
+generic names, but I'll just call them `location_` 1 to 3 as it's the setup not
+the model we're looking at.
+
+Now we could run our existing process can run in the same way with something
+like this:
+
+```r
+# Set up ----
+
+# Load user defined functions
+invisible(lapply(dir('R', full.names = TRUE)))
+
+# Configuration ----
+
+include_missing <- list(
+  location_1 = FALSE,
+  location_2 = FALSE,
+  location_3 = FALSE
+)
+
+# Load data ----
+
+conn <- connect_to_data_source()
+data_list <- load_data(conn)
+
+# Model transformation ----
+
+# a new argument here
+result <- build_model(data_list, include_missing)
+
+# Output ----
+
+write_to_file(result)
+```
+
+## Reading in a config
+
+It wouldn't be ideal to write out all the options like this. It would be a long
+list of lists assigned to a variable, which is just a bit uneccessarily clunky
+for this kind of thing.  I had seen some people using yaml files for configs,
+so I thought I'd try it out myself.  The strength of yaml is being friendlier
+for reading/writing nested structures, compared to say writing lists of lists
+in R. I defined a collection of configurations toggling 'missing' stage data in
+a out a different places in an `include_missing.yaml`. Structured like this
+(but with more mixes of options!):
+
+```yaml
+staged_only:
+  location_1: FALSE
+  location_2: FALSE
+  location_3: FALSE
+
+include_everywhere:
+  location_1: TRUE
+  location_2: TRUE
+  location_3: TRUE
+```
+
+Using the [yaml package](https://cran.r-project.org/web/packages/yaml/index.html) 
+function `read_yaml()` we can easily read this into a list (of lists) in R. 
+
+## User input
+
+The final thing we need is to get the user selection. I may cover this in more
+detail in another post, but in short I wrote a function that used
+`utils::menu()` to get user selection in an `interactive()` session, and
+[optparse package](https://cran.r-project.org/web/packages/optparse/index.html)
+for a non-interactive CLI run. The options were "include_missing" -
+the names of the configuration(s) to use, a "verbose" option for print more
+info to the console during a run and a "write_out" option to toggle the file
+writing if not needed in an interactive run. My function `get_user_selection()`
+returns a list of the user selection.
+
+Armed with the names of the configs the user wants, I could apply the main
+transformation function over each of them, and then bind the results together.
+It could probably cleaned up a bit, but this is what I wound up with:
+
+```r
+# Set up ----
+
+# Load user defined functions
+invisible(lapply(dir('R', full.names = TRUE)))
+
+# Configuration ----
+
+include_missing_cfg <- read_yaml('config/include_missing.yaml')
+choices <- get_user_selection(include_missing_cfg)
+
+set_print_options(choices$verbose)
+
+# Load data ----
+
+conn <- connect_to_data_source()
+data_list <- load_data(conn)
+
+# Model transformation ----
+
+# run the process for each selected configuration
+results <- lapply(
+  choices$include_missing,
+  function(choice) build_model(data_list, include_missing_cfg[[choice]])
+)
+
+# collate the results with a new column identifying the config
+names(results) <- choices$include_missing
+result <- dplyr::bind_rows(results, .id = "include_missing_cfg")
+
+# Output ----
+
+write_to_file(result, choices$write_out)
+```
+
+So there, all our results in one place, ready to compare and start answering
+the question.
+
+## Further thoughts
+
+This piece of work could have used configs a lot more. I must confess there
+were a few hard-coded values in the `build_model()` process that would be more
+flexible being pulled in from elsewhere. A case of just getting the job done
+taking precedent.
+
+I can see more complex scenario analyses arising if we wanted to try
+changes in more elements of the process, and see how the changes between
+different parts interact. I wonder how that would be managed. It might
+just be a case of using something like `expand.grid()`.
+
+One more package to check out - [config](https://cran.r-project.org/web/packages/config/index.html)
+for managing values in different environments - using `config::get()` instead
+of `yaml::read_yaml()`.
