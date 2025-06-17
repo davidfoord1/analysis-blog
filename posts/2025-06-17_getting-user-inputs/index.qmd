@@ -289,3 +289,8 @@ Rscript my_script.R --name reader --verbose
 
 
 ## Further thoughts
+
+I'm looking forward to playing with this, I think it will be particularly useful
+in the case of selecting configs. Though I don't working with `Rscript` in a
+shell is a particularly common workflow for R, I enjoy it for a "completed"
+pipeline, where I can get it to run without booting up an IDE.
