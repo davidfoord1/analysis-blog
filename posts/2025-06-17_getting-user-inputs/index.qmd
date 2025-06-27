@@ -1,0 +1,296 @@
+---
+title: "Getting user input for running a script"
+date: 2025-06-17
+categories:
+  - R
+  - Rscript
+  - optparse
+slug: "getting-user-input"
+---
+
+Get users choices both interactively and for CLI script runs.
+
+## Intro
+
+I recently started playing in my scripts with having
+[different configurations selected by a user](../2025-05-11_first-yaml-config/index.qmd).
+Here I'll cover off a few simple ways to get some user selection, in both R and
+Python.
+
+## Get a selection out of some preset options
+
+We can use `interactive()` to check if a user is running the script from an R
+console.
+
+```{r}
+#| eval: false
+choices <- c("apple", "banana", "cherry")
+
+if (interactive()) {
+  choice_num <- utils::menu(choices)
+}
+
+choice <- choices[choice_num]
+```
+
+The above code collects console input with a prompt like this:
+
+![The {utils} menu](utils_menu.png){fig-alt='Three options listed vertically,
+followed by a prompt Selection:'}
+
+## Command line input
+
+We can run a script as a command line tool in the shell like
+`Rscript my_script.R`. We  can capture strings passed in this context using
+`commandArgs()`. Specify the `trailingOnly` argument to get only strings after
+the script name.
+
+```{r}
+#| eval: false
+if (!interactive()) {
+  user_args <- commandArgs(trailingOnly = TRUE)
+}
+```
+
+`user_args` will be a character vector like `c('cat', 'apple', 'tree')` if we
+run this in the shell:
+
+```{sh}
+#| eval: false
+
+Rscript my_script.R cat apple tree
+```
+
+
+## So what kind of things might we do with this?
+
+Well, configuration options are going to be specific per script.
+How about adding some behaviour to respond to a name:
+
+```{r hello_reader}
+parse_cli_args <- function() {
+  if (!interactive()) {
+    user_args <- commandArgs(trailingOnly = TRUE)
+
+    print(paste0("Hello, ", user_args[1], "!"))
+  }
+}
+```
+
+```{r}
+#| code-fold: true
+#| code-summary: Writing to my_script.R
+
+# hacky file write
+save(parse_cli_args, file = 'parse_cli_args.Rdata')
+
+cat(
+  'load("parse_cli_args.Rdata")
+  parse_cli_args()',
+  file = 'my_script.R'
+)
+```
+
+If we write this to our file and include a call to `parse_cli_args()`, we can do
+this:
+
+asdf asdf as dfas df asdf asdf as df asdf as fas df
+```{sh}
+Rscript my_script.R reader
+```
+
+A more general typical argument is
+an option like "verbose" and/or "quiet" for printing more or less output during
+a script run.
+By convention options have a long name following 2 hyphens and many
+have a single character version following one hyphen.
+Let's piece a bit more of this together:
+
+```{r}
+parse_cli_args <- function() {
+  user_args <- commandArgs(trailingOnly = TRUE)
+
+  # find the string following the name arg definition.
+  name_pos <- grep("-n|--name", user_args) + 1
+
+  if (length(name_pos) == 1) {
+    name <- user_args[name_pos]
+    print(paste0("Hello, ", name, "!"))
+  }
+
+  # v OR verbose
+  if (any(grepl("-v|--verbose", user_args))) {
+    print("Printing extra output")
+  }
+}
+```
+
+```{r}
+#| code-fold: true
+#| code-summary: Writing to my_script.R
+
+# hacky file write
+save(parse_cli_args, file = 'parse_cli_args.Rdata')
+
+cat(
+  'load("parse_cli_args.Rdata")
+  parse_cli_args()',
+  file = 'my_script.R'
+)
+```
+
+We can start to play with different options, and combinations of options
+
+```{sh}
+Rscript my_script.R --name again
+```
+
+```{sh}
+Rscript my_script.R --v
+```
+
+```{sh}
+Rscript my_script.R --name world --verbose
+```
+
+## optparse
+
+Now if we want to be a bit more serious about this, there are more things to
+consider and edge cases to handle. We'll want to return a list of options
+for usage throughout the script and we'll want to  We might be better turning to
+a dedicated package like
+[{optparse}](https://trevorldavis.com/R/optparse/dev/)[^py],
+which sets out a framework for defining options, defaults and collecting the
+correct return types.
+
+[^py]: Which is based on the Python library
+[optparse](https://docs.python.org/3/library/optparse.html). On the topic of
+Python, `import sys` and `sys.argv` gives the equivalent to R's `commandArgs()`
+when running scripts like `python my_script.py`.
+
+```{r optparse}
+parse_cli_args <- function() {
+  parser <- optparse::OptionParser()
+
+  parser <- optparse::add_option(
+    parser,
+    c("-n", "--name"),
+    action = "store",
+    type = "character",
+    default = NULL,
+    help="Someone to say hello to"
+  )
+
+  parser <- optparse::add_option(
+    parser,
+    c("-v", "--verbose"),
+    action = "store_true",
+    default = FALSE,
+    help="Print extra output"
+  )
+
+  optparse::parse_args(parser)
+}
+```
+
+This gives us the same behaviour as before
+
+```{r}
+#| code-fold: true
+#| code-summary: Writing to my_script.R
+
+# hacky file write
+save(parse_cli_args, file = 'parse_cli_args.Rdata')
+
+cat(
+  'load("parse_cli_args.Rdata")
+  parse_cli_args()',
+  file = 'my_script.R'
+)
+```
+
+
+This captures the arguments in a list:
+
+```{sh}
+Rscript my_script.R --name reader
+```
+
+Plus some informative help information:
+
+```{sh}
+Rscript my_script.R --help
+```
+
+
+## Offer both options
+
+Quickly matching our shell args in our interactive version:
+
+```{r}
+get_opts_interactively <- function() {
+  name <- readline("Please enter your name:")
+
+  choice_num <- utils::menu(c("Yes", "No"),
+                            title = "Print extra output to the console?")
+
+  verbose <- as.logical(choice_num - 1)
+
+  list(name = name, verbose = verbose)
+}
+```
+
+We can then provide both ways depending on how the user executes the script:
+
+```{r}
+parse_user_args <- function() {
+  if (interactive()) {
+    return(get_opts_interactively())
+  }
+
+  parse_cli_args()
+}
+```
+
+We might pass the results on as argument to other functions:
+```{r}
+main <- function(choices) {
+  if(choices$verbose) {
+    print("Printing extra stuff again!")
+  }
+
+  name <- choices$name
+  print(paste0("Goodbye, ", name, "!"))
+}
+```
+```{r}
+#| code-fold: true
+#| code-summary: Writing to my_script.R
+
+# hacky file write to my_script.R :)
+save(get_opts_interactively,
+     parse_cli_args,
+     parse_user_args,
+     main,
+     file = 'parse_user_args.Rdata')
+
+cat(
+  'load("parse_user_args.Rdata")
+  choices <- parse_user_args()
+  main(choices)',
+  file = 'my_script.R'
+)
+```
+
+Still works the same:
+```{bash}
+Rscript my_script.R --name reader --verbose
+```
+
+
+## Further thoughts
+
+I'm looking forward to playing with this, I think it will be particularly useful
+in the case of selecting configs. Though I don't working with `Rscript` in a
+shell is a particularly common workflow for R, I enjoy it for a "completed"
+pipeline, where I can get it to run without booting up an IDE.
